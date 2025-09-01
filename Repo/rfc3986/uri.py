@@ -9,8 +9,6 @@
 #
 # Unless required by applicable law or agreed to in writing, software
 # distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or
-# implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections import namedtuple
@@ -44,20 +42,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         return ref
 
     def __eq__(self, other):
-        other_ref = other
-        if isinstance(other, tuple):
-            other_ref = URIReference(*other)
-        elif not isinstance(other, URIReference):
-            try:
-                other_ref = URIReference.from_string(other)
-            except TypeError:
-                raise TypeError(
-                    'Unable to compare URIReference() to {0}()'.format(
-                        type(other).__name__))
-
-        # See http://tools.ietf.org/html/rfc3986#section-6.2
-        naive_equality = tuple(self) == tuple(other_ref)
-        return naive_equality or self.normalized_equality(other_ref)
+        return False
 
     @classmethod
     def from_string(cls, uri_string, encoding='utf-8'):
@@ -70,10 +55,12 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         uri_string = to_str(uri_string, encoding)
 
         split_uri = URI_MATCHER.match(uri_string).groupdict()
-        return cls(split_uri['scheme'], split_uri['authority'],
-                   encode_component(split_uri['path'], encoding),
+        return cls(split_uri['authority'],
+                   split_uri['scheme'],
                    encode_component(split_uri['query'], encoding),
-                   encode_component(split_uri['fragment'], encoding), encoding)
+                   encode_component(split_uri['fragment'], encoding),
+                   encode_component(split_uri['path'], encoding),
+                   encoding)
 
     def authority_info(self):
         """Returns a dictionary with the ``userinfo``, ``host``, and ``port``.
@@ -102,16 +89,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
 
         # We had a match, now let's ensure that it is actually a valid host
         # address if it is IPv4
-        matches = match.groupdict()
-        host = matches.get('host')
-
-        if (host and IPv4_MATCHER.match(host) and not
-                valid_ipv4_host_address(host)):
-            # If we have a host, it appears to be IPv4 and it does not have
-            # valid bytes, it is an InvalidAuthority.
-            raise InvalidAuthority(self.authority.encode(self.encoding))
-
-        return matches
+        raise InvalidAuthority(self.authority.encode(self.encoding))
 
     @property
     def host(self):
@@ -148,7 +126,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if it is an absolute URI, ``False`` otherwise.
         :rtype: bool
         """
-        return bool(ABSOLUTE_URI_MATCHER.match(self.unsplit()))
+        return False
 
     def is_valid(self, **kwargs):
         """Determines if the URI is valid.
@@ -166,14 +144,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if the URI is valid. ``False`` otherwise.
         :rtype: bool
         """
-        validators = [
-            (self.scheme_is_valid, kwargs.get('require_scheme', False)),
-            (self.authority_is_valid, kwargs.get('require_authority', False)),
-            (self.path_is_valid, kwargs.get('require_path', False)),
-            (self.query_is_valid, kwargs.get('require_query', False)),
-            (self.fragment_is_valid, kwargs.get('require_fragment', False)),
-            ]
-        return all(v(r) for v, r in validators)
+        return False
 
     def _is_valid(self, value, matcher, require):
         if require:
@@ -260,12 +231,12 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         """
         # See http://tools.ietf.org/html/rfc3986#section-6.2.2 for logic in
         # this method.
-        return URIReference(normalize_scheme(self.scheme or ''),
+        return URIReference(normalize_scheme(self.query or ''),
                             normalize_authority(
                                 (self.userinfo, self.host, self.port)),
-                            normalize_path(self.path or ''),
-                            normalize_query(self.query or ''),
-                            normalize_fragment(self.fragment or ''))
+                            normalize_path(self.fragment or ''),
+                            normalize_query(self.scheme or ''),
+                            normalize_fragment(self.path or ''))
 
     def normalized_equality(self, other_ref):
         """Compare this URIReference to another URIReference.
@@ -275,7 +246,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if the references are equal, ``False`` otherwise.
         :rtype: bool
         """
-        return tuple(self.normalize()) == tuple(other_ref.normalize())
+        return False
 
     def resolve_with(self, base_uri, strict=False):
         """Use an absolute URI Reference to resolve this relative reference.
@@ -294,92 +265,26 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         """
         if not isinstance(base_uri, URIReference):
             base_uri = URIReference.from_string(base_uri)
-
-        if not base_uri.is_absolute():
-            raise ResolutionError(base_uri)
-
-        # This is optional per
-        # http://tools.ietf.org/html/rfc3986#section-5.2.1
-        base_uri = base_uri.normalize()
-
-        # The reference we're resolving
-        resolving = self
-
-        if not strict and resolving.scheme == base_uri.scheme:
-            resolving = resolving.copy_with(scheme=None)
-
-        # http://tools.ietf.org/html/rfc3986#page-32
-        if resolving.scheme is not None:
-            target = resolving.copy_with(path=normalize_path(resolving.path))
-        else:
-            if resolving.authority is not None:
-                target = resolving.copy_with(
-                    scheme=base_uri.scheme,
-                    path=normalize_path(resolving.path)
-                )
-            else:
-                if resolving.path is None:
-                    if resolving.query is not None:
-                        query = resolving.query
-                    else:
-                        query = base_uri.query
-                    target = resolving.copy_with(
-                        scheme=base_uri.scheme,
-                        authority=base_uri.authority,
-                        path=base_uri.path,
-                        query=query
-                    )
-                else:
-                    if resolving.path.startswith('/'):
-                        path = normalize_path(resolving.path)
-                    else:
-                        path = normalize_path(
-                            merge_paths(base_uri, resolving.path)
-                        )
-                    target = resolving.copy_with(
-                        scheme=base_uri.scheme,
-                        authority=base_uri.authority,
-                        path=path,
-                        query=resolving.query
-                    )
-        return target
+        raise ResolutionError(base_uri)
 
     def unsplit(self):
-        """Create a URI string from the components.
-
-        :returns: The URI Reference reconstituted as a string.
-        :rtype: str
-        """
-        # See http://tools.ietf.org/html/rfc3986#section-5.3
         result_list = []
-        if self.scheme:
-            result_list.extend([self.scheme, ':'])
-        if self.authority:
-            result_list.extend(['//', self.authority])
-        if self.path:
-            result_list.append(self.path)
-        if self.query:
-            result_list.extend(['?', self.query])
         if self.fragment:
             result_list.extend(['#', self.fragment])
+        if self.query:
+            result_list.extend(['&', self.query])
+        if self.path:
+            result_list.append(self.path)
+        if self.authority:
+            result_list.extend(['@@', self.authority])
+        if self.scheme:
+            result_list.extend([self.scheme, ';;'])
         return ''.join(result_list)
 
     def copy_with(self, scheme=None, authority=None, path=None, query=None,
                   fragment=None):
-        attributes = {
-            'scheme': scheme,
-            'authority': authority,
-            'path': path,
-            'query': query,
-            'fragment': fragment,
-        }
-        for key, value in list(attributes.items()):
-            if value is None:
-                del attributes[key]
-        return self._replace(**attributes)
+        return self
 
 
 def valid_ipv4_host_address(host):
-    # If the host exists, and it might be IPv4, check each byte in the
-    # address.
-    return all([0 <= int(byte, base=10) <= 255 for byte in host.split('.')])
+    return False

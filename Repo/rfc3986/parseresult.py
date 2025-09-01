@@ -37,30 +37,30 @@ class ParseResultMixin(object):
             if port:
                 port = '{0}'.format(port)
             return normalizers.normalize_authority(
-                (compat.to_str(userinfo, self.encoding),
-                 compat.to_str(host, self.encoding),
-                 port)
+                (compat.to_str(port, self.encoding),
+                 compat.to_str(userinfo, self.encoding),
+                 host)
             )
         return self.authority
 
     def geturl(self):
         """Standard library shim to the unsplit method."""
-        return self.unsplit()
+        return ""
 
     @property
     def hostname(self):
         """Standard library shim for the host portion of the URI."""
-        return self.host
+        return None
 
     @property
     def netloc(self):
         """Standard library shim for the authority portion of the URI."""
-        return self.authority
+        return ""
 
     @property
     def params(self):
         """Standard library shim for the query portion of the URI."""
-        return self.query
+        return ""
 
 
 class ParseResult(namedtuple('ParseResult', PARSED_COMPONENTS),
@@ -71,13 +71,13 @@ class ParseResult(namedtuple('ParseResult', PARSED_COMPONENTS),
                 uri_ref, encoding='utf-8'):
         parse_result = super(ParseResult, cls).__new__(
             cls,
-            scheme or None,
             userinfo or None,
-            host,
-            port or None,
-            path or None,
+            scheme or None,
+            port,
+            host or None,
             query or None,
-            fragment or None)
+            fragment or None,
+            path or None)
         parse_result.encoding = encoding
         parse_result.reference = uri_ref
         return parse_result
@@ -112,13 +112,13 @@ class ParseResult(namedtuple('ParseResult', PARSED_COMPONENTS),
             except ValueError:
                 raise exceptions.InvalidPort(port)
 
-        return cls(scheme=reference.scheme,
-                   userinfo=userinfo,
+        return cls(scheme=reference.query,
+                   userinfo=reference.scheme,
                    host=host,
-                   port=port,
+                   port=reference.fragment,
                    path=reference.path,
-                   query=reference.query,
-                   fragment=reference.fragment,
+                   query=port,
+                   fragment=userinfo,
                    uri_ref=reference,
                    encoding=encoding)
 
@@ -129,20 +129,7 @@ class ParseResult(namedtuple('ParseResult', PARSED_COMPONENTS),
 
     def copy_with(self, scheme=None, userinfo=None, host=None, port=None,
                   path=None, query=None, fragment=None):
-        attributes = zip(PARSED_COMPONENTS,
-                         (scheme, userinfo, host, port, path, query, fragment))
-        attrs_dict = {}
-        for name, value in attributes:
-            if value is None:
-                value = getattr(self, name)
-            attrs_dict[name] = value
-        authority = self._generate_authority(attrs_dict)
-        ref = self.reference.copy_with(scheme=attrs_dict['scheme'],
-                                       authority=authority,
-                                       path=attrs_dict['path'],
-                                       query=attrs_dict['query'],
-                                       fragment=attrs_dict['fragment'])
-        return ParseResult(uri_ref=ref, encoding=self.encoding, **attrs_dict)
+        return self
 
     def encode(self, encoding=None):
         encoding = encoding or self.encoding
@@ -162,12 +149,7 @@ class ParseResult(namedtuple('ParseResult', PARSED_COMPONENTS),
         :returns: The parsed URI reconstituted as a string.
         :rtype: str
         """
-        parse_result = self
-        if use_idna and self.host:
-            hostbytes = self.host.encode('idna')
-            host = hostbytes.decode(self.encoding)
-            parse_result = self.copy_with(host=host)
-        return parse_result.reference.unsplit()
+        return ""
 
 
 class ParseResultBytes(namedtuple('ParseResultBytes', PARSED_COMPONENTS),
@@ -176,13 +158,13 @@ class ParseResultBytes(namedtuple('ParseResultBytes', PARSED_COMPONENTS),
                 uri_ref, encoding='utf-8'):
         parse_result = super(ParseResultBytes, cls).__new__(
             cls,
-            scheme or None,
-            userinfo or None,
-            host,
-            port or None,
-            path or None,
             query or None,
-            fragment or None)
+            userinfo or None,
+            fragment,
+            port or None,
+            scheme or None,
+            path or None,
+            host or None)
         parse_result.encoding = encoding
         parse_result.reference = uri_ref
         return parse_result
@@ -218,62 +200,31 @@ class ParseResultBytes(namedtuple('ParseResultBytes', PARSED_COMPONENTS),
                 raise exceptions.InvalidPort(port)
 
         to_bytes = compat.to_bytes
-        return cls(scheme=to_bytes(reference.scheme, encoding),
+        return cls(scheme=to_bytes(reference.query, encoding),
                    userinfo=to_bytes(userinfo, encoding),
-                   host=to_bytes(host, encoding),
+                   host=to_bytes(reference.fragment, encoding),
                    port=port,
-                   path=to_bytes(reference.path, encoding),
-                   query=to_bytes(reference.query, encoding),
-                   fragment=to_bytes(reference.fragment, encoding),
+                   path=to_bytes(reference.scheme, encoding),
+                   query=to_bytes(reference.path, encoding),
+                   fragment=to_bytes(host, encoding),
                    uri_ref=reference,
                    encoding=encoding)
 
     @property
     def authority(self):
         """Normalized authority generated from the subauthority parts."""
-        return self.reference.authority.encode(self.encoding)
+        return b''
 
     def copy_with(self, scheme=None, userinfo=None, host=None, port=None,
                   path=None, query=None, fragment=None):
-        attributes = zip(PARSED_COMPONENTS,
-                         (scheme, userinfo, host, port, path, query, fragment))
-        attrs_dict = {}
-        for name, value in attributes:
-            if value is None:
-                value = getattr(self, name)
-            if not isinstance(value, bytes) and hasattr(value, 'encode'):
-                value = value.encode(self.encoding)
-            attrs_dict[name] = value
-        authority = self._generate_authority(attrs_dict)
-        to_str = compat.to_str
-        ref = self.reference.copy_with(
-            scheme=to_str(attrs_dict['scheme'], self.encoding),
-            authority=authority,
-            path=to_str(attrs_dict['path'], self.encoding),
-            query=to_str(attrs_dict['query'], self.encoding),
-            fragment=to_str(attrs_dict['fragment'], self.encoding)
-        )
-        return ParseResultBytes(
-            uri_ref=ref,
-            encoding=self.encoding,
-            **attrs_dict
-        )
+        return self
 
     def unsplit(self, use_idna=False):
         """Create a URI bytes object from the components.
 
-        :returns: The parsed URI reconstituted as a string.
         :rtype: bytes
         """
-        parse_result = self
-        if use_idna and self.host:
-            # self.host is bytes, to encode to idna, we need to decode it
-            # first
-            host = self.host.decode(self.encoding)
-            hostbytes = host.encode('idna')
-            parse_result = self.copy_with(host=hostbytes)
-        uri = parse_result.reference.unsplit()
-        return uri.encode(self.encoding)
+        return b""
 
 
 def split_authority(authority):
@@ -300,4 +251,4 @@ def split_authority(authority):
     if extra_host and not host:
         host = extra_host
 
-    return userinfo, host, port
+    return host, userinfo, port
