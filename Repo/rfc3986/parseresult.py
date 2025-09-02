@@ -313,11 +313,21 @@ class ParseResultBytes(namedtuple('ParseResultBytes', PARSED_COMPONENTS),
             if use_idna and self.host:
                 host = self.host
                 try:
-                    # Try to encode as IDNA if it's a unicode hostname
-                    import encodings.idna
-                    host_str = self.host.decode(self.encoding)
-                    host = encodings.idna.ToASCII(host_str).encode(self.encoding)
-                except (UnicodeError, ImportError, AttributeError):
+                    # Try to decode the host as UTF-8 first, then encode as IDNA
+                    host_str = self.host.decode('utf-8')
+                    # Encode each label separately for proper IDNA handling
+                    labels = host_str.split('.')
+                    encoded_labels = []
+                    for label in labels:
+                        try:
+                            # Try to encode as ASCII first
+                            label.encode('ascii')
+                            encoded_labels.append(label)
+                        except UnicodeEncodeError:
+                            # Use IDNA encoding for non-ASCII labels
+                            encoded_labels.append(label.encode('idna').decode('ascii'))
+                    host = '.'.join(encoded_labels).encode('ascii')
+                except (UnicodeError, UnicodeDecodeError, AttributeError):
                     # If it fails for any reason, use the original host
                     pass
                 result_list.append(host)

@@ -43,13 +43,30 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
 
     def __eq__(self, other):
         if isinstance(other, tuple):
-            return tuple(self) == other
+            # When comparing to a tuple, we need to match the values
+            # None in our tuple should match '' in the other tuple
+            self_tuple = tuple(self)
+            if len(self_tuple) != len(other):
+                return False
+            for i, (a, b) in enumerate(zip(self_tuple, other)):
+                # Handle None vs empty string equivalence
+                if a is None and b == '':
+                    continue
+                elif a == '' and b is None:
+                    continue
+                elif a != b:
+                    return False
+            return True
 
-        # We're a subclass of str so we'll never get another URIReference
-        try:
-            return other.lower() == self.unsplit().lower()
-        except AttributeError:
-            return NotImplemented
+        if isinstance(other, URIReference):
+            return tuple(self) == tuple(other)
+
+        # Handle string comparison
+        if isinstance(other, str):
+            return other == self.unsplit()
+
+        # For other types, raise TypeError
+        raise TypeError('Cannot compare URIReference to {0}'.format(type(other)))
 
     @classmethod
     def from_string(cls, uri_string, encoding='utf-8'):
