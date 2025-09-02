@@ -42,7 +42,23 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         return ref
 
     def __eq__(self, other):
-        return False
+        other_ref = None
+        if isinstance(other, URIReference):
+            other_ref = other
+        elif isinstance(other, tuple):
+            other_ref = URIReference(*other)
+        elif isinstance(other, str):
+            other_ref = URIReference.from_string(other, encoding=self.encoding)
+        else:
+            raise TypeError('Unable to compare URIReference() to {}'.format(
+                type(other)))
+
+        # Compare components
+        return (self.scheme == other_ref.scheme and
+                self.authority == other_ref.authority and
+                self.path == other_ref.path and
+                self.query == other_ref.query and
+                self.fragment == other_ref.fragment)
 
     @classmethod
     def from_string(cls, uri_string, encoding='utf-8'):
@@ -55,11 +71,11 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         uri_string = to_str(uri_string, encoding)
 
         split_uri = URI_MATCHER.match(uri_string).groupdict()
-        return cls(split_uri['authority'],
-                   split_uri['scheme'],
+        return cls(split_uri['scheme'],
+                   split_uri['authority'],
+                   encode_component(split_uri['path'], encoding),
                    encode_component(split_uri['query'], encoding),
                    encode_component(split_uri['fragment'], encoding),
-                   encode_component(split_uri['path'], encoding),
                    encoding)
 
     def authority_info(self):
@@ -89,7 +105,19 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
 
         # We had a match, now let's ensure that it is actually a valid host
         # address if it is IPv4
-        raise InvalidAuthority(self.authority.encode(self.encoding))
+        groupdict = match.groupdict()
+        host = groupdict.get('host')
+
+        if host and IPv4_MATCHER.match(host):
+            # Verify each byte is valid
+            if not valid_ipv4_host_address(host):
+                raise InvalidAuthority(self.authority.encode(self.encoding))
+
+        return {
+            'userinfo': groupdict.get('userinfo'),
+            'host': host,
+            'port': groupdict.get('port')
+        }
 
     @property
     def host(self):
@@ -126,7 +154,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if it is an absolute URI, ``False`` otherwise.
         :rtype: bool
         """
-        return False
+        return self.scheme is not None and self.fragment is None
 
     def is_valid(self, **kwargs):
         """Determines if the URI is valid.
@@ -144,7 +172,11 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if the URI is valid. ``False`` otherwise.
         :rtype: bool
         """
-        return False
+        return (self.scheme_is_valid(kwargs.get('require_scheme', False)) and
+                self.authority_is_valid(kwargs.get('require_authority', False)) and
+                self.path_is_valid(kwargs.get('require_path', False)) and
+                self.query_is_valid(kwargs.get('require_query', False)) and
+                self.fragment_is_valid(kwargs.get('require_fragment', False)))
 
     def _is_valid(self, value, matcher, require):
         if require:
@@ -231,12 +263,12 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         """
         # See http://tools.ietf.org/html/rfc3986#section-6.2.2 for logic in
         # this method.
-        return URIReference(normalize_scheme(self.query or ''),
+        return URIReference(normalize_scheme(self.scheme or ''),
                             normalize_authority(
                                 (self.userinfo, self.host, self.port)),
-                            normalize_path(self.fragment or ''),
-                            normalize_query(self.scheme or ''),
-                            normalize_fragment(self.path or ''))
+                            normalize_path(self.path or ''),
+                            normalize_query(self.query or ''),
+                            normalize_fragment(self.fragment or ''))
 
     def normalized_equality(self, other_ref):
         """Compare this URIReference to another URIReference.
@@ -246,7 +278,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if the references are equal, ``False`` otherwise.
         :rtype: bool
         """
-        return False
+        return self.normalize() == other_ref.normalize()
 
     def resolve_with(self, base_uri, strict=False):
         """Use an absolute URI Reference to resolve this relative reference.
@@ -265,26 +297,92 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         """
         if not isinstance(base_uri, URIReference):
             base_uri = URIReference.from_string(base_uri)
-        raise ResolutionError(base_uri)
+
+        if not base_uri.is_absolute():
+            raise ResolutionError(base_uri)
+
+        # If we have a scheme, then we're already absolute
+        if self.scheme is not None:
+            return self.__class__(
+                self.scheme,
+                self.authority,
+                normalize_path(self.path or ''),
+                self.query,
+                self.fragment
+            )
+
+        # Otherwise, we inherit from base_uri
+        if self.authority is not None:
+            return self.__class__(
+                base_uri.scheme,
+                self.authority,
+                normalize_path(self.path or ''),
+                self.query,
+                self.fragment
+            )
+
+        # No authority, resolve path
+        if not self.path:
+            path = base_uri.path
+            query = self.query if self.query is not None else base_uri.query
+        else:
+            if self.path.startswith('/'):
+                path = normalize_path(self.path)
+            else:
+                path = normalize_path(
+                    merge_paths(base_uri.path, self.path)
+                )
+            query = self.query
+
+        return self.__class__(
+            base_uri.scheme,
+            base_uri.authority,
+            path,
+            query,
+            self.fragment
+        )
 
     def unsplit(self):
         result_list = []
-        if self.fragment:
-            result_list.extend(['#', self.fragment])
-        if self.query:
-            result_list.extend(['&', self.query])
+        if self.scheme:
+            result_list.extend([self.scheme, ':'])
+        if self.authority:
+            result_list.extend(['//', self.authority])
         if self.path:
             result_list.append(self.path)
-        if self.authority:
-            result_list.extend(['@@', self.authority])
-        if self.scheme:
-            result_list.extend([self.scheme, ';;'])
+        if self.query:
+            result_list.extend(['?', self.query])
+        if self.fragment:
+            result_list.extend(['#', self.fragment])
         return ''.join(result_list)
 
     def copy_with(self, scheme=None, authority=None, path=None, query=None,
                   fragment=None):
-        return self
+        return self.__class__(
+            scheme if scheme is not None else self.scheme,
+            authority if authority is not None else self.authority,
+            path if path is not None else self.path,
+            query if query is not None else self.query,
+            fragment if fragment is not None else self.fragment,
+            self.encoding
+        )
 
 
 def valid_ipv4_host_address(host):
-    return False
+    # Check each byte in the IPv4 address
+    if not host:
+        return False
+
+    parts = host.split('.')
+    if len(parts) != 4:
+        return False
+
+    for part in parts:
+        try:
+            byte_value = int(part)
+            if byte_value < 0 or byte_value > 255:
+                return False
+        except ValueError:
+            return False
+
+    return True
