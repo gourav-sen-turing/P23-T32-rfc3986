@@ -42,14 +42,19 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         return ref
 
     def __eq__(self, other):
-        if isinstance(other, tuple):
+        if isinstance(other, URIReference):
+            return tuple(self) == tuple(other)
+        elif isinstance(other, tuple):
             return tuple(self) == other
+        elif isinstance(other, str):
+            return other == self.unsplit()
+        return NotImplemented
 
-        # We're a subclass of str so we'll never get another URIReference
-        try:
-            return other.lower() == self.unsplit().lower()
-        except AttributeError:
+    def __ne__(self, other):
+        result = self.__eq__(other)
+        if result is NotImplemented:
             return NotImplemented
+        return not result
 
     @classmethod
     def from_string(cls, uri_string, encoding='utf-8'):
@@ -308,6 +313,10 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
 
         # The reference we're resolving
         ref = self
+
+        # This is optional per
+        # http://tools.ietf.org/html/rfc3986#section-5.2.1
+        ref = ref.normalize()
 
         if ref.scheme is not None and ref.scheme != base_uri.scheme:
             target = ref

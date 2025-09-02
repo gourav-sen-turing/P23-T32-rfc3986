@@ -170,7 +170,7 @@ class ParseResult(namedtuple('ParseResult', PARSED_COMPONENTS),
         encoding = encoding or self.encoding
         attrs = dict(
             zip(PARSED_COMPONENTS,
-                (attr.encode(encoding) if hasattr(attr, 'encode') else attr
+                (attr.encode(encoding) if hasattr(attr, 'encode') and attr is not None else attr
                  for attr in self)))
         return ParseResultBytes(
             uri_ref=self.reference,
@@ -235,7 +235,7 @@ class ParseResultBytes(namedtuple('ParseResultBytes', PARSED_COMPONENTS),
                 raise exceptions.InvalidPort(port)
 
         to_bytes = compat.to_bytes
-        return cls(scheme=to_bytes(reference.scheme, encoding),
+        return cls(scheme=to_bytes(reference.scheme, encoding) if reference.scheme else None,
                    userinfo=to_bytes(userinfo, encoding) if userinfo else None,
                    host=to_bytes(host, encoding) if host else None,
                    port=port,
@@ -297,6 +297,7 @@ class ParseResultBytes(namedtuple('ParseResultBytes', PARSED_COMPONENTS),
     def unsplit(self, use_idna=False):
         """Create a URI bytes object from the components.
 
+        :param bool use_idna: Use IDNA encoding for the domain name
         :rtype: bytes
         """
         result_list = []
@@ -310,15 +311,17 @@ class ParseResultBytes(namedtuple('ParseResultBytes', PARSED_COMPONENTS),
                 result_list.extend([self.userinfo, b'@'])
 
             # Handle IDNA encoding for internationalized domain names
-            if use_idna and self.host:
+            if use_idna:
                 host = self.host
                 try:
-                    # Try to encode as IDNA if it's a unicode hostname
-                    import encodings.idna
-                    host_str = self.host.decode(self.encoding)
-                    host = encodings.idna.ToASCII(host_str).encode(self.encoding)
+                    # Check if this looks like a non-ASCII hostname
+                    host_str = host.decode(self.encoding)
+                    if any(ord(c) > 127 for c in host_str):
+                        # Try to use the idna codec to encode the hostname
+                        import codecs
+                        host = codecs.encode(host_str, 'idna')
                 except (UnicodeError, ImportError, AttributeError):
-                    # If it fails for any reason, use the original host
+                    # If anything fails, use the original host
                     pass
                 result_list.append(host)
             else:
