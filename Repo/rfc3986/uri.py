@@ -42,7 +42,14 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         return ref
 
     def __eq__(self, other):
-        return False
+        if isinstance(other, tuple):
+            return tuple(self) == other
+
+        # We're a subclass of str so we'll never get another URIReference
+        try:
+            return other.lower() == self.unsplit().lower()
+        except AttributeError:
+            return NotImplemented
 
     @classmethod
     def from_string(cls, uri_string, encoding='utf-8'):
@@ -55,11 +62,11 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         uri_string = to_str(uri_string, encoding)
 
         split_uri = URI_MATCHER.match(uri_string).groupdict()
-        return cls(split_uri['authority'],
-                   split_uri['scheme'],
-                   encode_component(split_uri['query'], encoding),
-                   encode_component(split_uri['fragment'], encoding),
-                   encode_component(split_uri['path'], encoding),
+        return cls(split_uri['scheme'],
+                   split_uri['authority'],
+                   split_uri['path'],
+                   split_uri['query'],
+                   split_uri['fragment'],
                    encoding)
 
     def authority_info(self):
@@ -89,7 +96,14 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
 
         # We had a match, now let's ensure that it is actually a valid host
         # address if it is IPv4
-        raise InvalidAuthority(self.authority.encode(self.encoding))
+        groupdict = match.groupdict()
+        host = groupdict['host']
+
+        if host and IPv4_MATCHER.match(host):
+            if not valid_ipv4_host_address(host):
+                raise InvalidAuthority(self.authority.encode(self.encoding))
+
+        return groupdict
 
     @property
     def host(self):
@@ -126,7 +140,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if it is an absolute URI, ``False`` otherwise.
         :rtype: bool
         """
-        return False
+        return self.scheme is not None and self.fragment is None
 
     def is_valid(self, **kwargs):
         """Determines if the URI is valid.
@@ -144,7 +158,25 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if the URI is valid. ``False`` otherwise.
         :rtype: bool
         """
-        return False
+        require_scheme = kwargs.get('require_scheme', False)
+        require_authority = kwargs.get('require_authority', False)
+        require_path = kwargs.get('require_path', False)
+        require_query = kwargs.get('require_query', False)
+        require_fragment = kwargs.get('require_fragment', False)
+
+        valid_scheme = self.scheme_is_valid(require=require_scheme)
+        valid_path = self.path_is_valid(require=require_path)
+        valid_query = self.query_is_valid(require=require_query)
+        valid_fragment = self.fragment_is_valid(require=require_fragment)
+        valid_authority = self.authority_is_valid(require=require_authority)
+
+        return all([
+            valid_scheme,
+            valid_path,
+            valid_query,
+            valid_fragment,
+            valid_authority,
+        ])
 
     def _is_valid(self, value, matcher, require):
         if require:
@@ -231,12 +263,13 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         """
         # See http://tools.ietf.org/html/rfc3986#section-6.2.2 for logic in
         # this method.
-        return URIReference(normalize_scheme(self.query or ''),
+        return URIReference(normalize_scheme(self.scheme or ''),
                             normalize_authority(
                                 (self.userinfo, self.host, self.port)),
-                            normalize_path(self.fragment or ''),
-                            normalize_query(self.scheme or ''),
-                            normalize_fragment(self.path or ''))
+                            normalize_path(self.path or ''),
+                            normalize_query(self.query or ''),
+                            normalize_fragment(self.fragment or ''),
+                            self.encoding)
 
     def normalized_equality(self, other_ref):
         """Compare this URIReference to another URIReference.
@@ -246,7 +279,7 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         :returns: ``True`` if the references are equal, ``False`` otherwise.
         :rtype: bool
         """
-        return False
+        return self.normalize() == other_ref.normalize()
 
     def resolve_with(self, base_uri, strict=False):
         """Use an absolute URI Reference to resolve this relative reference.
@@ -265,26 +298,91 @@ class URIReference(namedtuple('URIReference', URI_COMPONENTS)):
         """
         if not isinstance(base_uri, URIReference):
             base_uri = URIReference.from_string(base_uri)
-        raise ResolutionError(base_uri)
+
+        if not base_uri.is_absolute():
+            raise ResolutionError(base_uri)
+
+        # This is optional per
+        # http://tools.ietf.org/html/rfc3986#section-5.2.1
+        base_uri = base_uri.normalize()
+
+        # The reference we're resolving
+        ref = self
+
+        if ref.scheme is not None and ref.scheme != base_uri.scheme:
+            target = ref
+        else:
+            if ref.authority is not None:
+                target_authority = ref.authority
+                target_path = ref.path or ''
+                target_query = ref.query
+            else:
+                target_authority = base_uri.authority
+
+                if ref.path is None or ref.path == '':
+                    target_path = base_uri.path
+                    target_query = ref.query or base_uri.query
+                else:
+                    if ref.path.startswith('/'):
+                        target_path = ref.path
+                    else:
+                        target_path = merge_paths(base_uri, ref.path)
+                    target_query = ref.query
+
+            target = URIReference(base_uri.scheme, target_authority, target_path,
+                                 target_query, ref.fragment)
+
+        return target
 
     def unsplit(self):
+        """Create a URI string from the components.
+
+        :returns: The URI Reference reconstituted as a string.
+        :rtype: str
+        """
         result_list = []
-        if self.fragment:
-            result_list.extend(['#', self.fragment])
-        if self.query:
-            result_list.extend(['&', self.query])
-        if self.path:
+        if self.scheme is not None:
+            result_list.extend([self.scheme, ':'])
+        if self.authority is not None:
+            result_list.extend(['//', self.authority])
+        if self.path is not None:
             result_list.append(self.path)
-        if self.authority:
-            result_list.extend(['@@', self.authority])
-        if self.scheme:
-            result_list.extend([self.scheme, ';;'])
+        if self.query is not None:
+            result_list.extend(['?', self.query])
+        if self.fragment is not None:
+            result_list.extend(['#', self.fragment])
         return ''.join(result_list)
 
     def copy_with(self, scheme=None, authority=None, path=None, query=None,
                   fragment=None):
-        return self
+        """Create a copy of this reference with the new components.
+
+        :returns: New URIReference with the specified components.
+        :rtype: URIReference
+        """
+        return URIReference(
+            scheme or self.scheme,
+            authority or self.authority,
+            path or self.path,
+            query or self.query,
+            fragment or self.fragment,
+            self.encoding
+        )
 
 
 def valid_ipv4_host_address(host):
-    return False
+    """Determine if the given host is a valid IPv4 address.
+
+    :param str host: The host portion of an authority component.
+    :returns: ``True`` if the host is valid, ``False`` otherwise.
+    :rtype: bool
+    """
+    # If each segment is in the proper range, the host is valid
+    for segment in host.split('.'):
+        try:
+            segment = int(segment)
+        except ValueError:
+            return False
+        if segment < 0 or segment > 255:
+            return False
+    return True
